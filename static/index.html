@@ -1,0 +1,712 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PDF Eraser</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            background: #1a1a2e; color: #eee; min-height: 100vh;
+        }
+
+        /* ---- Top toolbar ---- */
+        .toolbar {
+            position: fixed; top: 0; left: 0; right: 0; height: 56px;
+            background: #16213e; display: flex; align-items: center;
+            padding: 0 16px; gap: 8px; z-index: 100;
+            border-bottom: 1px solid #0f3460; box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+        }
+        .toolbar h1 { font-size: 17px; font-weight: 600; white-space: nowrap; }
+        .btn {
+            padding: 7px 14px; border: none; border-radius: 6px;
+            cursor: pointer; font-size: 13px; font-weight: 500; transition: background 0.2s;
+            white-space: nowrap;
+        }
+        .btn-primary { background: #e94560; color: white; }
+        .btn-primary:hover { background: #c73650; }
+        .btn-secondary { background: #0f3460; color: #eee; }
+        .btn-secondary:hover { background: #1a4a7a; }
+        .btn-active { background: #2a5a9a; color: #fff; border: 1px solid #4a8adf; }
+        .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+        .spacer { flex: 1; }
+        .status { font-size: 12px; color: #aaa; white-space: nowrap; }
+        .status.working { color: #f0c040; }
+        .status.done { color: #2ecc71; }
+        .tb-sep { width: 1px; height: 28px; background: #0f3460; margin: 0 4px; }
+
+        /* ---- Upload ---- */
+        .upload-area {
+            display: flex; flex-direction: column; align-items: center;
+            justify-content: center; height: calc(100vh - 56px); margin-top: 56px;
+        }
+        .upload-box {
+            border: 2px dashed #0f3460; border-radius: 16px;
+            padding: 60px 80px; text-align: center; cursor: pointer;
+            transition: border-color 0.2s, background 0.2s;
+        }
+        .upload-box:hover, .upload-box.dragover {
+            border-color: #e94560; background: rgba(233, 69, 96, 0.05);
+        }
+        .upload-box p { margin-top: 12px; color: #888; }
+        .upload-box .icon { font-size: 48px; }
+
+        /* ---- Editor ---- */
+        .editor {
+            margin-top: 56px; display: flex; flex-direction: column;
+            align-items: center; padding: 20px; gap: 20px;
+        }
+        .page-container {
+            position: relative; background: white;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.4); border-radius: 4px;
+        }
+        .page-container canvas { display: block; border-radius: 4px; }
+
+        /* Selection overlay */
+        .select-overlay {
+            position: absolute; top: 0; left: 0;
+            width: 100%; height: 100%;
+            cursor: crosshair;
+        }
+        .select-overlay.mode-copy { cursor: copy; }
+        .select-overlay.mode-cleanbg { cursor: cell; }
+        .selection-rect {
+            position: absolute; border: 2px dashed #e94560;
+            background: rgba(233, 69, 96, 0.15); pointer-events: none;
+        }
+        .selection-rect.copy-sel {
+            border-color: #3498db;
+            background: rgba(52, 152, 219, 0.15);
+        }
+        .selection-rect.cleanbg-sel {
+            border-color: #f39c12;
+            background: rgba(243, 156, 18, 0.15);
+        }
+
+        /* ---- Paste floating element ---- */
+        .paste-float {
+            position: absolute;
+            border: 2px solid #2ecc71;
+            cursor: move;
+            box-shadow: 0 2px 12px rgba(0,0,0,0.4);
+            z-index: 10;
+        }
+        .paste-float img {
+            width: 100%; height: 100%;
+            display: block; pointer-events: none;
+        }
+        /* Resize handles */
+        .paste-float .handle {
+            position: absolute; width: 12px; height: 12px;
+            background: #2ecc71; border: 2px solid #fff;
+            border-radius: 2px; z-index: 11;
+        }
+        .paste-float .handle-tl { top: -6px; left: -6px; cursor: nwse-resize; }
+        .paste-float .handle-tr { top: -6px; right: -6px; cursor: nesw-resize; }
+        .paste-float .handle-bl { bottom: -6px; left: -6px; cursor: nesw-resize; }
+        .paste-float .handle-br { bottom: -6px; right: -6px; cursor: nwse-resize; }
+        /* Side handles */
+        .paste-float .handle-t { top: -6px; left: 50%; transform: translateX(-50%); cursor: ns-resize; }
+        .paste-float .handle-b { bottom: -6px; left: 50%; transform: translateX(-50%); cursor: ns-resize; }
+        .paste-float .handle-l { top: 50%; left: -6px; transform: translateY(-50%); cursor: ew-resize; }
+        .paste-float .handle-r { top: 50%; right: -6px; transform: translateY(-50%); cursor: ew-resize; }
+        /* Paste action buttons */
+        .paste-actions {
+            position: absolute; bottom: -36px; left: 50%;
+            transform: translateX(-50%); display: flex; gap: 4px;
+            white-space: nowrap;
+        }
+        .paste-actions .btn { padding: 4px 10px; font-size: 11px; }
+
+        .page-label { text-align: center; color: #888; font-size: 13px; margin-top: -12px; margin-bottom: 8px; }
+        .hint { text-align: center; color: #666; font-size: 13px; }
+        #file-input { display: none; }
+    </style>
+</head>
+<body>
+    <div class="toolbar">
+        <h1>PDF Eraser</h1>
+        <button class="btn btn-secondary" onclick="document.getElementById('file-input').click()">Open PDF</button>
+        <div class="tb-sep"></div>
+        <button class="btn btn-secondary btn-active" id="tool-erase" onclick="setTool('erase')">Erase</button>
+        <button class="btn btn-secondary" id="tool-cleanbg" onclick="setTool('cleanbg')">Clean BG</button>
+        <button class="btn btn-secondary" id="tool-copy" onclick="setTool('copy')">Copy</button>
+        <button class="btn btn-secondary" id="paste-btn" disabled onclick="startPaste()">Paste</button>
+        <div class="tb-sep"></div>
+        <button class="btn btn-secondary" id="undo-btn" disabled onclick="doUndo()" title="Undo (Ctrl+Z)">&#x21A9; Undo</button>
+        <button class="btn btn-secondary" id="redo-btn" disabled onclick="doRedo()" title="Redo (Ctrl+Y)">&#x21AA; Redo</button>
+        <div class="spacer"></div>
+        <span class="status" id="status"></span>
+        <button class="btn btn-primary" id="dl-btn" disabled onclick="downloadPdf()">Download PDF</button>
+    </div>
+    <input type="file" id="file-input" accept=".pdf" onchange="handleFile(this.files[0])">
+
+    <div class="upload-area" id="upload-area">
+        <div class="upload-box" id="upload-box" onclick="document.getElementById('file-input').click()">
+            <div class="icon">+</div>
+            <p>Drop a PDF here or click to upload</p>
+        </div>
+    </div>
+
+    <div class="editor" id="editor" style="display:none"></div>
+
+    <script type="module">
+        import * as pdfjsLib from 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.9.155/pdf.min.mjs';
+        pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.9.155/pdf.worker.min.mjs';
+        window.pdfjsLib = pdfjsLib;
+    </script>
+    <script>
+        let currentFileId = null;
+        let pagesData = [];
+        let canvases = [];
+        let overlays = [];
+        let containers = [];
+        let modifiedPages = new Set();
+
+        let currentTool = 'erase'; // 'erase' | 'copy'
+        let clipboard = null;      // { image: base64, w, h } (pixel dimensions from backend)
+        let activePaste = null;    // { el, pageNum, img base64 }
+
+        const SCALE = 1.5;
+        const DPI_SCALE = 200 / 72;
+
+        // ==================== TOOL SWITCHING ====================
+        window.setTool = function(tool) {
+            if (activePaste) cancelPaste();
+            currentTool = tool;
+            document.getElementById('tool-erase').classList.toggle('btn-active', tool === 'erase');
+            document.getElementById('tool-cleanbg').classList.toggle('btn-active', tool === 'cleanbg');
+            document.getElementById('tool-copy').classList.toggle('btn-active', tool === 'copy');
+            overlays.forEach(ov => {
+                ov.classList.remove('mode-copy', 'mode-cleanbg');
+                if (tool === 'copy') ov.classList.add('mode-copy');
+                if (tool === 'cleanbg') ov.classList.add('mode-cleanbg');
+            });
+            if (tool === 'erase') setStatus('Draw a rectangle to erase', 'done');
+            else if (tool === 'cleanbg') setStatus('Draw a rectangle to clean background (keeps text)', 'done');
+            else setStatus('Draw a rectangle to copy a region', 'done');
+        };
+
+        // ---- Drag & drop ----
+        const uploadBox = document.getElementById('upload-box');
+        document.body.addEventListener('dragover', e => { e.preventDefault(); uploadBox.classList.add('dragover'); });
+        document.body.addEventListener('dragleave', () => uploadBox.classList.remove('dragover'));
+        document.body.addEventListener('drop', e => {
+            e.preventDefault(); uploadBox.classList.remove('dragover');
+            if (e.dataTransfer.files.length) handleFile(e.dataTransfer.files[0]);
+        });
+
+        function setStatus(text, cls) {
+            const el = document.getElementById('status');
+            el.textContent = text;
+            el.className = 'status' + (cls ? ' ' + cls : '');
+        }
+
+        // ==================== UPLOAD & RENDER ====================
+        window.handleFile = async function(file) {
+            if (!file || !file.name.toLowerCase().endsWith('.pdf')) return;
+
+            document.getElementById('upload-area').style.display = 'none';
+            document.getElementById('editor').style.display = 'flex';
+            setStatus('Uploading...', 'working');
+
+            const fd = new FormData();
+            fd.append('file', file);
+            const upRes = await fetch('/upload', { method: 'POST', body: fd });
+            const upData = await upRes.json();
+            if (upData.error) {
+                alert(upData.error);
+                document.getElementById('upload-area').style.display = 'flex';
+                document.getElementById('editor').style.display = 'none';
+                return;
+            }
+
+            currentFileId = upData.file_id;
+            pagesData = upData.pages;
+            canvases = []; overlays = []; containers = [];
+            modifiedPages = new Set();
+            clipboard = null;
+            activePaste = null;
+            document.getElementById('paste-btn').disabled = true;
+
+            setStatus('Rendering pages...', 'working');
+            await renderPages();
+            setStatus('Draw a rectangle to erase', 'done');
+        };
+
+        async function renderPages() {
+            const editor = document.getElementById('editor');
+            editor.innerHTML = '';
+
+            const hint = document.createElement('div');
+            hint.className = 'hint';
+            hint.textContent = 'Use Erase to remove content, Copy to grab a region, Paste to place it.';
+            editor.appendChild(hint);
+
+            const pdf = await window.pdfjsLib.getDocument(`/pdf/${currentFileId}`).promise;
+
+            for (let i = 0; i < pagesData.length; i++) {
+                const pi = pagesData[i];
+                const cw = pi.width * SCALE, ch = pi.height * SCALE;
+
+                const container = document.createElement('div');
+                container.className = 'page-container';
+                container.style.width = cw + 'px';
+                container.style.height = ch + 'px';
+                containers[i] = container;
+
+                const canvas = document.createElement('canvas');
+                canvas.width = cw;
+                canvas.height = ch;
+                container.appendChild(canvas);
+                canvases[i] = canvas;
+
+                const pdfPage = await pdf.getPage(i + 1);
+                const vp = pdfPage.getViewport({ scale: SCALE });
+                await pdfPage.render({ canvasContext: canvas.getContext('2d'), viewport: vp }).promise;
+
+                const overlay = document.createElement('div');
+                overlay.className = 'select-overlay';
+                overlay.dataset.page = i;
+                setupSelection(overlay, i, cw, ch);
+                container.appendChild(overlay);
+                overlays[i] = overlay;
+
+                const label = document.createElement('div');
+                label.className = 'page-label';
+                label.textContent = `Page ${i + 1} of ${pagesData.length}`;
+                editor.appendChild(container);
+                editor.appendChild(label);
+            }
+            pdf.destroy();
+        }
+
+        // ==================== SELECTION (erase & copy) ====================
+        function setupSelection(overlay, pageNum, cw, ch) {
+            let startX, startY, selRect = null;
+            let dragging = false;
+
+            overlay.addEventListener('mousedown', e => {
+                if (e.button !== 0) return;
+                // Don't start selection if clicking on a paste float
+                if (e.target.closest('.paste-float')) return;
+                if (activePaste) return; // paste mode active, don't select
+
+                const rect = overlay.getBoundingClientRect();
+                startX = e.clientX - rect.left;
+                startY = e.clientY - rect.top;
+                dragging = true;
+
+                if (selRect) selRect.remove();
+                selRect = document.createElement('div');
+                const selCls = currentTool === 'copy' ? ' copy-sel' : currentTool === 'cleanbg' ? ' cleanbg-sel' : '';
+                selRect.className = 'selection-rect' + selCls;
+                overlay.appendChild(selRect);
+            });
+
+            overlay.addEventListener('mousemove', e => {
+                if (!dragging || !selRect) return;
+                const rect = overlay.getBoundingClientRect();
+                const curX = Math.max(0, Math.min(cw, e.clientX - rect.left));
+                const curY = Math.max(0, Math.min(ch, e.clientY - rect.top));
+
+                const x = Math.min(startX, curX);
+                const y = Math.min(startY, curY);
+                const w = Math.abs(curX - startX);
+                const h = Math.abs(curY - startY);
+
+                selRect.style.left = x + 'px';
+                selRect.style.top = y + 'px';
+                selRect.style.width = w + 'px';
+                selRect.style.height = h + 'px';
+            });
+
+            overlay.addEventListener('mouseup', async e => {
+                if (!dragging || !selRect) return;
+                dragging = false;
+
+                const rect = overlay.getBoundingClientRect();
+                const endX = Math.max(0, Math.min(cw, e.clientX - rect.left));
+                const endY = Math.max(0, Math.min(ch, e.clientY - rect.top));
+
+                const x = Math.min(startX, endX);
+                const y = Math.min(startY, endY);
+                const w = Math.abs(endX - startX);
+                const h = Math.abs(endY - startY);
+
+                selRect.remove();
+                selRect = null;
+
+                if (w < 5 || h < 5) return;
+
+                const pdfRect = {
+                    x: x / SCALE,
+                    y: y / SCALE,
+                    w: w / SCALE,
+                    h: h / SCALE,
+                };
+
+                if (currentTool === 'erase') {
+                    await eraseRegion(pageNum, pdfRect);
+                } else if (currentTool === 'cleanbg') {
+                    await cleanBackground(pageNum, pdfRect);
+                } else if (currentTool === 'copy') {
+                    await copyRegion(pageNum, pdfRect, w, h);
+                }
+            });
+
+            overlay.addEventListener('mouseleave', () => {
+                if (dragging && selRect) {
+                    selRect.remove();
+                    selRect = null;
+                    dragging = false;
+                }
+            });
+        }
+
+        // ==================== ERASE ====================
+        async function eraseRegion(pageNum, pdfRect) {
+            setStatus('Erasing...', 'working');
+            try {
+                const res = await fetch('/erase', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ file_id: currentFileId, page: pageNum, rect: pdfRect }),
+                });
+                const data = await res.json();
+                if (data.error) { setStatus('Error: ' + data.error, ''); return; }
+
+                await drawBase64ToCanvas(canvases[pageNum], data.image);
+                modifiedPages.add(pageNum);
+                document.getElementById('dl-btn').disabled = false;
+                updateUndoRedo(data.undo_remaining, undefined);
+                setStatus('Erased! Select another area or download.', 'done');
+            } catch (err) {
+                setStatus('Erase failed: ' + err.message, '');
+            }
+        }
+
+        // ==================== CLEAN BACKGROUND ====================
+        async function cleanBackground(pageNum, pdfRect) {
+            setStatus('Cleaning background...', 'working');
+            try {
+                const res = await fetch('/clean-bg', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ file_id: currentFileId, page: pageNum, rect: pdfRect }),
+                });
+                const data = await res.json();
+                if (data.error) { setStatus('Error: ' + data.error, ''); return; }
+
+                await drawBase64ToCanvas(canvases[pageNum], data.image);
+                modifiedPages.add(pageNum);
+                document.getElementById('dl-btn').disabled = false;
+                updateUndoRedo(data.undo_remaining, undefined);
+                setStatus('Background cleaned, text preserved!', 'done');
+            } catch (err) {
+                setStatus('Clean BG failed: ' + err.message, '');
+            }
+        }
+
+        // ==================== COPY ====================
+        async function copyRegion(pageNum, pdfRect, displayW, displayH) {
+            setStatus('Copying...', 'working');
+            try {
+                const res = await fetch('/copy', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ file_id: currentFileId, page: pageNum, rect: pdfRect }),
+                });
+                const data = await res.json();
+                if (data.error) { setStatus('Error: ' + data.error, ''); return; }
+
+                clipboard = {
+                    image: data.image,
+                    pxW: data.w,
+                    pxH: data.h,
+                    displayW: displayW,
+                    displayH: displayH,
+                };
+                document.getElementById('paste-btn').disabled = false;
+                setStatus('Copied! Click Paste to place it.', 'done');
+            } catch (err) {
+                setStatus('Copy failed: ' + err.message, '');
+            }
+        }
+
+        // ==================== PASTE ====================
+        window.startPaste = function() {
+            if (!clipboard) return;
+            if (activePaste) cancelPaste();
+
+            // Place on the first page by default, centered
+            const pageNum = 0;
+            const container = containers[pageNum];
+            const cw = parseFloat(container.style.width);
+            const ch = parseFloat(container.style.height);
+
+            let pw = clipboard.displayW;
+            let ph = clipboard.displayH;
+            let px = (cw - pw) / 2;
+            let py = (ch - ph) / 2;
+
+            createPasteFloat(pageNum, px, py, pw, ph);
+            setStatus('Move and resize the pasted region, then click Commit.', 'done');
+        };
+
+        function createPasteFloat(pageNum, x, y, w, h) {
+            const container = containers[pageNum];
+            const cw = parseFloat(container.style.width);
+            const ch = parseFloat(container.style.height);
+
+            const el = document.createElement('div');
+            el.className = 'paste-float';
+            el.style.left = x + 'px';
+            el.style.top = y + 'px';
+            el.style.width = w + 'px';
+            el.style.height = h + 'px';
+
+            const img = document.createElement('img');
+            img.src = 'data:image/png;base64,' + clipboard.image;
+            el.appendChild(img);
+
+            // Resize handles
+            const handles = ['tl','tr','bl','br','t','b','l','r'];
+            handles.forEach(h => {
+                const handle = document.createElement('div');
+                handle.className = `handle handle-${h}`;
+                handle.dataset.handle = h;
+                el.appendChild(handle);
+            });
+
+            // Action buttons
+            const actions = document.createElement('div');
+            actions.className = 'paste-actions';
+            actions.innerHTML = `
+                <button class="btn btn-primary" onclick="commitPaste()">Commit</button>
+                <button class="btn btn-secondary" onclick="cancelPaste()">Cancel</button>
+            `;
+            el.appendChild(actions);
+
+            container.appendChild(el);
+
+            activePaste = { el, pageNum, image: clipboard.image };
+
+            // ---- Drag to move ----
+            let dragState = null;
+
+            el.addEventListener('mousedown', e => {
+                // Check if we're clicking a handle
+                const handleEl = e.target.closest('.handle');
+                if (handleEl) {
+                    e.stopPropagation();
+                    startResize(e, handleEl.dataset.handle, el, cw, ch);
+                    return;
+                }
+                // Check if clicking actions
+                if (e.target.closest('.paste-actions')) return;
+
+                e.preventDefault();
+                e.stopPropagation();
+                const rect = container.getBoundingClientRect();
+                dragState = {
+                    offsetX: e.clientX - parseFloat(el.style.left) - rect.left,
+                    offsetY: e.clientY - parseFloat(el.style.top) - rect.top,
+                };
+
+                function onMove(ev) {
+                    if (!dragState) return;
+                    const rect2 = container.getBoundingClientRect();
+                    let nx = ev.clientX - rect2.left - dragState.offsetX;
+                    let ny = ev.clientY - rect2.top - dragState.offsetY;
+                    // Clamp within page
+                    nx = Math.max(-parseFloat(el.style.width) / 2, Math.min(cw - parseFloat(el.style.width) / 2, nx));
+                    ny = Math.max(-parseFloat(el.style.height) / 2, Math.min(ch - parseFloat(el.style.height) / 2, ny));
+                    el.style.left = nx + 'px';
+                    el.style.top = ny + 'px';
+                }
+
+                function onUp() {
+                    dragState = null;
+                    document.removeEventListener('mousemove', onMove);
+                    document.removeEventListener('mouseup', onUp);
+                }
+
+                document.addEventListener('mousemove', onMove);
+                document.addEventListener('mouseup', onUp);
+            });
+        }
+
+        function startResize(e, handle, el, cw, ch) {
+            e.preventDefault();
+            const startX = e.clientX, startY = e.clientY;
+            const startL = parseFloat(el.style.left);
+            const startT = parseFloat(el.style.top);
+            const startW = parseFloat(el.style.width);
+            const startH = parseFloat(el.style.height);
+
+            function onMove(ev) {
+                const dx = ev.clientX - startX;
+                const dy = ev.clientY - startY;
+                let nl = startL, nt = startT, nw = startW, nh = startH;
+
+                if (handle.includes('r')) { nw = Math.max(20, startW + dx); }
+                if (handle.includes('l')) { nw = Math.max(20, startW - dx); nl = startL + dx; if (nw === 20) nl = startL + startW - 20; }
+                if (handle.includes('b')) { nh = Math.max(20, startH + dy); }
+                if (handle.includes('t')) { nh = Math.max(20, startH - dy); nt = startT + dy; if (nh === 20) nt = startT + startH - 20; }
+
+                el.style.left = nl + 'px';
+                el.style.top = nt + 'px';
+                el.style.width = nw + 'px';
+                el.style.height = nh + 'px';
+            }
+
+            function onUp() {
+                document.removeEventListener('mousemove', onMove);
+                document.removeEventListener('mouseup', onUp);
+            }
+
+            document.addEventListener('mousemove', onMove);
+            document.addEventListener('mouseup', onUp);
+        }
+
+        window.commitPaste = async function() {
+            if (!activePaste) return;
+
+            const { el, pageNum, image } = activePaste;
+            const x = parseFloat(el.style.left);
+            const y = parseFloat(el.style.top);
+            const w = parseFloat(el.style.width);
+            const h = parseFloat(el.style.height);
+
+            // Convert to PDF points
+            const dest = { x: x / SCALE, y: y / SCALE, w: w / SCALE, h: h / SCALE };
+
+            setStatus('Pasting...', 'working');
+            el.remove();
+            activePaste = null;
+
+            try {
+                const res = await fetch('/paste', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        file_id: currentFileId,
+                        page: pageNum,
+                        image: image,
+                        dest: dest,
+                    }),
+                });
+                const data = await res.json();
+                if (data.error) { setStatus('Error: ' + data.error, ''); return; }
+
+                await drawBase64ToCanvas(canvases[pageNum], data.image);
+                modifiedPages.add(pageNum);
+                document.getElementById('dl-btn').disabled = false;
+                updateUndoRedo(data.undo_remaining, undefined);
+                setStatus('Pasted! You can paste again or continue editing.', 'done');
+            } catch (err) {
+                setStatus('Paste failed: ' + err.message, '');
+            }
+        };
+
+        window.cancelPaste = function() {
+            if (activePaste) {
+                activePaste.el.remove();
+                activePaste = null;
+            }
+            setStatus('Paste cancelled.', '');
+        };
+
+        // ==================== UNDO / REDO ====================
+        window.doUndo = async function() {
+            if (!currentFileId) return;
+            if (activePaste) cancelPaste();
+            setStatus('Undoing...', 'working');
+            const res = await fetch('/undo', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ file_id: currentFileId }),
+            });
+            const data = await res.json();
+            if (data.error) { setStatus(data.error, ''); return; }
+            await drawBase64ToCanvas(canvases[data.page], data.image);
+            updateUndoRedo(data.undo_remaining, data.redo_remaining);
+            setStatus('Undone', 'done');
+        };
+
+        window.doRedo = async function() {
+            if (!currentFileId) return;
+            if (activePaste) cancelPaste();
+            setStatus('Redoing...', 'working');
+            const res = await fetch('/redo', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ file_id: currentFileId }),
+            });
+            const data = await res.json();
+            if (data.error) { setStatus(data.error, ''); return; }
+            await drawBase64ToCanvas(canvases[data.page], data.image);
+            updateUndoRedo(data.undo_remaining, data.redo_remaining);
+            setStatus('Redone', 'done');
+        };
+
+        function updateUndoRedo(undo, redo) {
+            if (undo !== undefined) document.getElementById('undo-btn').disabled = undo === 0;
+            if (redo !== undefined) document.getElementById('redo-btn').disabled = redo === 0;
+        }
+
+        // Keyboard shortcuts
+        document.addEventListener('keydown', e => {
+            if ((e.ctrlKey || e.metaKey) && e.key === 'z' && !e.shiftKey) {
+                e.preventDefault(); doUndo();
+            }
+            if ((e.ctrlKey || e.metaKey) && (e.key === 'y' || (e.key === 'z' && e.shiftKey))) {
+                e.preventDefault(); doRedo();
+            }
+            if (e.key === 'Escape' && activePaste) {
+                cancelPaste();
+            }
+            if ((e.ctrlKey || e.metaKey) && e.key === 'v' && clipboard) {
+                e.preventDefault(); startPaste();
+            }
+        });
+
+        // ==================== DOWNLOAD ====================
+        window.downloadPdf = async function() {
+            if (activePaste) cancelPaste();
+            const btn = document.getElementById('dl-btn');
+            btn.disabled = true; btn.textContent = 'Building...';
+            setStatus('Generating PDF...', 'working');
+
+            const res = await fetch('/download', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    file_id: currentFileId,
+                    modified_pages: Array.from(modifiedPages),
+                }),
+            });
+            const data = await res.json();
+            btn.textContent = 'Download PDF'; btn.disabled = false;
+
+            if (data.error) { setStatus('Error: ' + data.error, ''); return; }
+            window.location.href = `/download/${data.file_id}`;
+            setStatus('Downloaded!', 'done');
+        };
+
+        // ==================== HELPERS ====================
+        function drawBase64ToCanvas(canvas, b64) {
+            return new Promise(resolve => {
+                const img = new window.Image();
+                img.onload = () => {
+                    canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
+                    resolve();
+                };
+                img.src = 'data:image/jpeg;base64,' + b64;
+            });
+        }
+    </script>
+</body>
+</html>
